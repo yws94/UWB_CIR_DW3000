@@ -23,7 +23,7 @@
 #include <usb_device.h>
 #include <port.h>
 #include "examples_defines.h"
-#include "example_selection.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -94,7 +94,7 @@ void test_run_info(unsigned char *data)
 
     data_length=strlen((const char *)data);
     CDC_Transmit_FS(data, data_length);/*Transmit the data through USB - Virtual port*/
-    CDC_Transmit_FS((uint8_t*)"\n\r", 2);/*Transmit end of line through USB - Virtual port*/
+    //CDC_Transmit_FS((uint8_t*)"\n\r", 2);/*Transmit end of line through USB - Virtual port*/
 }
 /* USER CODE BEGIN PFP */
 
@@ -114,7 +114,6 @@ int main(void)
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
-	printf("hi");
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -152,7 +151,7 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-	  rx_diagnostics();
+	  get_CIR();
 
     /* USER CODE BEGIN 3 */
   }
