@@ -168,11 +168,8 @@ int get_CIR(void)
 			     real_CIR[j] = ((CIR_data[i+2]) << 16 | (CIR_data[i+1]) << 8 | (CIR_data[i])); // 비트 이동후 or 연산
 			     if (real_CIR[j] & 0x00800000){ // and연산
 				  real_CIR[j] |= 0xff000000; //뒤의 16진수와 or연산 후 할당
-				  if (real_CIR[j] | 0xf0){
-				  }
 			     }
 			    int32_t tempval = real_CIR[j];
-			   // test_run_info((unsigned char *)real_CIR);
 
 				//CDC_Transmit_FS(real_CIR[j], sizeof(real_CIR[j]));
 			    //HAL_UART_Transmit(&huart6, &real_CIR[j], 1016, 100);
@@ -188,8 +185,6 @@ int get_CIR(void)
 					CDC_Transmit_FS((uint8_t*)"\n", 1);
 				}
 			}
-
-		   //printf("\r\n");
         }
         else
         {
