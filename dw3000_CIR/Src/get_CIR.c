@@ -1,22 +1,3 @@
-/*! ----------------------------------------------------------------------------
- *  @file    rx_diagnostics.c
- *  @brief   Simple RX with diagnostics example code
- *
- *           This application waits for reception of a frame. After each frame received with a good CRC it reads some data provided by DW IC:
- *               - Diagnostics data (e.g. first path index, first path amplitude, channel impulse response, etc.). See dwt_rxdiag_t structure for more
- *                 details on the data read.
- *               - Accumulator values around the first path.
- *           It also reads event counters (e.g. CRC good, CRC error, PHY header error, etc.) after any event, be it a good frame or an RX error. See
- *           dwt_deviceentcnts_t structure for more details on the counters read.
- *
- * @attention
- *
- * Copyright 2016-2020 (c) Decawave Ltd, Dublin, Ireland.
- *
- * All rights reserved.
- *
- * @author Decawave
- */
 
 #include <deca_device_api.h>
 #include <deca_regs.h>
@@ -24,14 +5,13 @@
 #include <port.h>
 #include <shared_defines.h>
 
+void get_CIR_INIT(void);
+void extract_data(void);
+void send_realCIR(void);
 
 extern void test_run_info(unsigned char *data);
-extern UART_HandleTypeDef huart6;
 
-/* Example application name */
-#define APP_NAME "RX DIAG v1.0"
-
-/* Default communication configuration. We use default non-STS DW mode. */
+/* Communication configuration. */
 static dwt_config_t config = {
     5,               /* Channel number. */
     DWT_PLEN_128,    /* Preamble length. Used in TX only. */
@@ -48,154 +28,128 @@ static dwt_config_t config = {
     DWT_PDOA_M0      /* PDOA mode off */
 };
 
-/* Buffer to store received frame. See NOTE 1 below. */
-static uint8_t rx_buffer[FRAME_LEN_MAX];
-
-/* Hold copy of status register state here for reference, so reader can examine it at a breakpoint. */
-static uint32_t status_reg = 0;
-
-/* Hold copy of frame length of frame received (if good), so reader can examine it at a breakpoint. */
-static uint16_t frame_len = 0;
-
-/* Hold copy of event counters so that it can be examined at a debug breakpoint. */
-static dwt_deviceentcnts_t event_cnt;
-
-/* Hold copy of diagnostics data so that it can be examined at a debug breakpoint. */
-static dwt_rxdiag_t rx_diag;
-
-/* Hold copy of accumulator data so that it can be examined at a debug breakpoint. See NOTE 2. */
+/* Constants */
 #define ACCUM_DATA_LEN (3 * 2 * (3 + 3) + 1)
+
+/*struct*/
+static dwt_get_CIR getCIR;
+
+/* Variables*/
+static uint32_t status_reg = 0;
+static uint16_t frame_len = 0;
+static dwt_deviceentcnts_t event_cnt;
+static uint8_t rx_buffer[FRAME_LEN_MAX];
 static uint8_t accum_data[ACCUM_DATA_LEN];
 static uint8_t CIR_data[6097];
 static int32_t real_CIR[1016];
-/**
- * Application entry point.
- */
+
 int get_CIR(void)
 {
-    /* Configure SPI rate, DW3000 supports up to 38 MHz */
-    port_set_dw_ic_spi_fastrate();
-
-    /* Reset DW IC */
-    reset_DWIC(); /* Target specific drive of RSTn line into DW IC low for a period. */
-
-    Sleep(2); // Time needed for DW3000 to start up (transition from INIT_RC to IDLE_RC, or could wait for SPIRDY event)
-
-    while (!dwt_checkidlerc()) /* Need to make sure DW IC is in IDLE_RC before proceeding */
-    { };
-
-    if (dwt_initialise(DWT_DW_INIT) == DWT_ERROR)
-    {
-        test_run_info((unsigned char *)"INIT FAILED");
-        while (1)
-        { };
-    }
-
-    /* Configure DW IC. */
-    if(dwt_configure(&config)) /* if the dwt_configure returns DWT_ERROR either the PLL or RX calibration has failed the host should reset the device */
-    {
-        test_run_info((unsigned char *)"CONFIG FAILED     ");
-        while (1)
-        { };
-    }
-
-    /* Activate event counters. */
+    /* DW IC configuration*/
+    get_CIR_INIT();
     dwt_configeventcounters(1);
-
-    /* Enable IC diagnostic calculation and logging */
     dwt_configciadiag(1);
 
-    /* Loop forever receiving frames. */
-    while (1)
-    {
-        int i;
+    /* Loop for receiving frames. */
+	while (1) {
 
-        /* TESTING BREAKPOINT LOCATION #1 */
+		int i;
+		/* Clear local RX buffer and accumulator values */
+		for (i = 0; i < FRAME_LEN_MAX; i++) {
+			rx_buffer[i] = 0;
+		}
+		for (i = 0; i < ACCUM_DATA_LEN; i++) {
+			accum_data[i] = 0;
+		}
+		memset(&getCIR, 0, sizeof(getCIR));
 
-        /* Clear local RX buffer, rx_diag structure and accumulator values to avoid having leftovers from previous receptions  This is not necessary
-         * but is included here to aid reading the data for each new frame.
-         * This is a good place to put a breakpoint. Here (after first time through the loop) the local status register will be set for last event
-         * and if a good receive has happened the data buffer will have the data in it, and frame_len will be set to the length of the RX frame. All
-         * diagnostics data will also be available. */
-        for (i = 0 ; i < FRAME_LEN_MAX; i++ )
-        {
-            rx_buffer[i] = 0;
-        }
-        for (i = 0 ; i < ACCUM_DATA_LEN; i++ )
-        {
-           accum_data[i] = 0;
-        }
+		/* Activate reception immediately. See NOTE 4 below. */
+		dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
-        memset(&rx_diag,0,sizeof(rx_diag));
+		/* Poll until a frame is properly received or an error/timeout occurs. See NOTE 5 below. */
+		while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID))& (SYS_STATUS_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_ERR)))
+		{};
 
-        /* Activate reception immediately. See NOTE 4 below. */
-        dwt_rxenable(DWT_START_RX_IMMEDIATE);
+		/*Convert CIR data to real_CIR data, then send to serial monitor*/
+		send_realCIR();
 
-        /* Poll until a frame is properly received or an error/timeout occurs. See NOTE 5 below.
-         * STATUS register is 5 bytes long but, as the event we are looking at is in the first byte of the register, we can use this simplest API
-         * function to access it. */
-        while (!((status_reg = dwt_read32bitreg(SYS_STATUS_ID)) & (SYS_STATUS_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_ERR)))
-        { };
-
-        if (status_reg & SYS_STATUS_RXFCG_BIT_MASK)
-        {
-            /* Clear good RX frame event in the DW IC status register. */
-            dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_RXFCG_BIT_MASK);
-
-            /* A frame has been received, copy it to our local buffer. */
-            frame_len = dwt_read32bitreg(RX_FINFO_ID) & RX_FINFO_RXFLEN_BIT_MASK;
-            if (frame_len <= FRAME_LEN_MAX)
-            {
-                dwt_readrxdata(rx_buffer, frame_len, 0);
-            }
-
-
-            /*if ranging is done, extract CIR and other data*/
-		   dwt_readdiagnostics(&rx_diag);
-		   uint16_t fp_int = rx_diag.ipatovFpIndex >> 6;
-		   uint32_t fa_1 = rx_diag.ipatovF1;
-		   uint32_t fa_2 = rx_diag.ipatovF2;
-		   uint32_t fa_3 = rx_diag.ipatovF3;
-		   uint16_t cir_power = rx_diag.ipatovPower;
-		   uint16_t cir_peak1 = rx_diag.ipatovPeak >> 21;
-		   uint32_t cir_peak2 = rx_diag.ipatovPeak & 0x1fffff;
-
-
-		   dwt_readaccdata(CIR_data, 6097, 0);
-
-		   int j = 0;
-		   for(int i=1; i<6097; i+=6){
-			     real_CIR[j] = ((CIR_data[i+2]) << 16 | (CIR_data[i+1]) << 8 | (CIR_data[i])); // 비트 이동후 or 연산
-			     if (real_CIR[j] & 0x00800000){ // and연산
-				  real_CIR[j] |= 0xff000000; //뒤의 16진수와 or연산 후 할당
-			     }
-			    int32_t tempval = real_CIR[j];
-
-				//CDC_Transmit_FS(real_CIR[j], sizeof(real_CIR[j]));
-			    //HAL_UART_Transmit(&huart6, &real_CIR[j], 1016, 100);
-			    Sleep(0.001);
-				j++;
-				}
-
-			for (int k = 0; k < 1015; k += 1) {
-				test_run_info((unsigned char *) real_CIR);
-				snprintf(real_CIR, sizeof(real_CIR), "%d,", real_CIR[k]);
-
-				if (k%1016==0){
-					CDC_Transmit_FS((uint8_t*)"\n", 1);
-				}
-			}
-        }
-        else
-        {
-            /* Clear RX error events in the DW IC status register. */
-            dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_ERR);
-        }
-
-        /* Read event counters. See NOTE 7. */
-        dwt_readeventcounters(&event_cnt);
-    }
+		/* Read event counters. See NOTE 7. */
+		dwt_readeventcounters(&event_cnt);
+	}
 }
+
+void get_CIR_INIT(void){
+
+	port_set_dw_ic_spi_fastrate();
+	reset_DWIC();
+	Sleep(2);
+
+	while (!dwt_checkidlerc())
+	{};
+
+	if (dwt_initialise(DWT_DW_INIT) == DWT_ERROR) {
+		while (1) {};
+	}
+
+	/* Configure DW IC. */
+	if (dwt_configure(&config))
+	{
+		while (1)
+		{};
+	}
+}
+
+void extract_data(void){
+	   dwt_readdiagnostics(&getCIR);
+	   uint16_t fp_int = getCIR.ipatovFpIndex >> 6;
+	   uint32_t fa_1 = getCIR.ipatovF1;
+	   uint32_t fa_2 = getCIR.ipatovF2;
+	   uint32_t fa_3 = getCIR.ipatovF3;
+	   uint16_t cir_power = getCIR.ipatovPower;
+	   uint16_t cir_peak1 = getCIR.ipatovPeak >> 21;
+	   uint32_t cir_peak2 = getCIR.ipatovPeak & 0x1fffff;
+}
+
+void send_realCIR(void) {
+	if (status_reg & SYS_STATUS_RXFCG_BIT_MASK) {
+		/* Clear good RX frame event in the DW IC status register. */
+		dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_RXFCG_BIT_MASK);
+
+		/* A frame has been received, copy it to our local buffer. */
+		frame_len = dwt_read32bitreg(RX_FINFO_ID) & RX_FINFO_RXFLEN_BIT_MASK;
+		if (frame_len <= FRAME_LEN_MAX) {
+			dwt_readrxdata(rx_buffer, frame_len, 0);
+		}
+
+		/*if received, extract CIR and other data*/
+		extract_data();
+
+		dwt_readaccdata(&CIR_data, 6097, 0);
+		int j = 0;
+		for (int i = 1; i < 6097; i += 6) {
+			real_CIR[j] = ((CIR_data[i + 2]) << 16 | (CIR_data[i + 1]) << 8 | (CIR_data[i]));
+			if (real_CIR[j] & 0x00800000) {
+				real_CIR[j] |= 0xff000000;
+			}
+			snprintf(real_CIR, sizeof(real_CIR), "%d,", real_CIR[j]);
+			test_run_info((unsigned char *) real_CIR);
+			j++;
+			if (j%1015==0){
+				CDC_Transmit_FS((uint8_t*)"\r\n",2);
+			}
+
+		}
+
+	}
+
+	else {
+		/* Clear RX error events in the DW IC status register. */
+		dwt_write32bitreg(SYS_STATUS_ID, SYS_STATUS_ALL_RX_ERR);
+	}
+	/* Read event counters. See NOTE 7. */
+	dwt_readeventcounters(&event_cnt);
+}
+
 /*****************************************************************************************************************************************************
  * NOTES:
  *
@@ -207,9 +161,9 @@ int get_CIR(void)
  * 3. In this example, the DW IC is put into IDLE state after calling dwt_initialise(). This means that a fast SPI rate of up to 20 MHz can be used
  *    thereafter.
  * 4. Manual reception activation is performed here but DW IC offers several features that can be used to handle more complex scenarios or to
- *    optimise system's overall performance (e.g. timeout after a given time, automatic re-enabling of reception in case of errors, etc.).
- * 5. We use polled mode of operation here to keep the example as simple as posrrupts".sible, but RXFCG and error/timeout status events can be used to generate
- *    interrupts. Please refer to DW IC User Manual for more details on "inte
+ *    optimize system's overall performance (e.g. timeout after a given time, automatic re-enabling of reception in case of errors, etc.).
+ * 5. We use polled mode of operation here to keep the example as simple as possible, but RXFCG and error/timeout status events can be used to generate
+ *    interrupts. Please refer to DW IC User Manual for more details on "interrupts".
  * 6. Here we chose to read only a few values around the first path index but it is possible and can be useful to get all accumulator values, using
  *    the relevant offset and length parameters. Reading the whole accumulator will require 4064 bytes of memory. First path value gotten from
  *    dwt_readdiagnostics is a 10.6 bits fixed point value calculated by the DW IC. By dividing this value by 64, we end up with the integer part of
@@ -219,3 +173,4 @@ int get_CIR(void)
  * 8. The user is referred to DecaRanging ARM application (distributed with EVK1000 product) for additional practical example of usage, and to the
  *    DW IC API Guide for more details on the DW IC driver functions.
  ****************************************************************************************************************************************************/
+
